@@ -427,107 +427,116 @@ def download_file(url, dest, filename, mod_index, total_mods, mod_name):
 
 
 ANNO_117_ID = 11358  # Anno 117 game ID on mod.io
+SCRIPT_DIR  = Path(__file__).resolve().parent
+CREDS_FILE  = SCRIPT_DIR / "credentials.json"
+
+# ─────────────────────────────────────────────
+#  Credentials persistence
+# ─────────────────────────────────────────────
+
+def load_credentials() -> dict:
+    if CREDS_FILE.exists():
+        try:
+            return json.loads(CREDS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_credentials(data: dict):
+    try:
+        CREDS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"  {yellow(f'Could not save credentials: {e}')}")
 
 # ─────────────────────────────────────────────
 #  Anno 117 collection bundler
 # ─────────────────────────────────────────────
+def read_mod_data(file_path: Path) -> dict:
+    """Liest ModID und enthaltene Bundle-IDs aus einer modinfo.json."""
+    data = {"id": None, "sub_ids": []}
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = json.load(f)
+            data["id"] = content.get("ModID")
 
-def read_mod_id_from_folder(mod_folder: Path) -> str | None:
-    """Read the ModID from a mod's modinfo.json or modinfo.jsonc, if it exists."""
-    for filename in ("modinfo.json", "modinfo.jsonc"):
-        modinfo_path = mod_folder / filename
-        if not modinfo_path.exists():
-            continue
+            # Prüfen, ob diese Mod selbst schon andere Mods bündelt
+            dev = content.get("Development", {})
+            bundle = dev.get("Bundle", [])
+            if isinstance(bundle, list):
+                data["sub_ids"] = bundle
+    except Exception:
+        # Falls json.load fehlschlägt (z.B. wegen Kommentaren in .jsonc),
+        # nutzen wir einen Fallback-Regex für die ModID
         try:
-            raw = modinfo_path.read_text(encoding="utf-8")
-            # Strip single-line // comments (jsonc support)
-            lines = [re.sub(r"//.*", "", line) for line in raw.splitlines()]
-            cleaned = "\n".join(lines)
-            data = json.loads(cleaned)
-            mod_id = data.get("ModID")
-            if mod_id:
-                return mod_id
-        except Exception:
-            continue
-    return None
+            with open(file_path, "r", encoding="utf-8") as f:
+                raw = f.read()
+                mid = re.search(r'"ModID"\s*:\s*"([^"]+)"', raw)
+                if mid: data["id"] = mid.group(1)
+        except: pass
+    return data
 
+def find_all_mod_ids_in_folder(folder: Path) -> tuple[set, set]:
+    """
+    Findet alle ModIDs und alle IDs, die bereits in Unter-Bundles stecken.
+    Returns: (set_aller_ids, set_der_sub_ids)
+    """
+    all_ids = set()
+    already_bundled_elsewhere = set()
 
-def find_mod_id(folder: Path, max_depth: int = 4) -> str | None:
-    """Recursively search for a modinfo.json/jsonc up to max_depth levels deep."""
-    found = read_mod_id_from_folder(folder)
-    if found:
-        return found
-    if max_depth <= 0:
-        return None
-    for sub in sorted(folder.iterdir()):
-        if sub.is_dir():
-            found = find_mod_id(sub, max_depth - 1)
-            if found:
-                return found
-    return None
+    for p in folder.rglob("modinfo.json*"):
+        if p.is_file():
+            mod_data = read_mod_data(p)
+            if mod_data["id"]:
+                all_ids.add(mod_data["id"])
+            if mod_data["sub_ids"]:
+                for sid in mod_data["sub_ids"]:
+                    already_bundled_elsewhere.add(sid)
 
+    return all_ids, already_bundled_elsewhere
 
 def bundle_as_collection(output_dir: Path, collection_name: str, collection_id: int, succeeded_mods: list[str]):
-    """
-    Moves all downloaded mod folders into a bundle folder and creates
-    a modinfo.json referencing all of them by ModID.
-    """
     import shutil
-
     print(f"\n  {bold('─── Bundling as Anno 117 collection mod ───')}")
 
-    # Ask for display name and creator before doing anything
-    display_name = ask(f"Bundle display name {dim(f'[default: {collection_name}]')}")
-    if not display_name:
-        display_name = collection_name
+    display_name = ask(f"Bundle display name {dim(f'[default: {collection_name}]')}") or collection_name
+    creator = ask(f"Creator name {dim('[default: Unknown]')}") or "Unknown"
 
-    creator = ask(f"Creator name {dim('[default: Unknown]')}")
-    if not creator:
-        creator = "Unknown"
-
-    # Create the bundle folder
     bundle_dir = output_dir / sanitize(display_name)
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    # Move all mod folders into the bundle folder
-    move_failed = []
+    # 1. Verschieben
     for mod_name in succeeded_mods:
         src = output_dir / mod_name
         dst = bundle_dir / mod_name
         if src.exists() and src.resolve() != bundle_dir.resolve():
             try:
+                if dst.exists(): shutil.rmtree(dst)
                 shutil.move(str(src), str(dst))
-            except Exception:
-                move_failed.append(mod_name)
+            except Exception as e:
+                print(f"  {red('✗')} Failed to move {mod_name}: {e}")
 
-    if move_failed:
-        print(f"  {yellow('⚠')} Could not move {len(move_failed)} folder(s) into bundle:")
-        for m in move_failed:
-            print(f"    {dim('–')} {m}")
+    # 2. IDs sammeln und Dubletten durch Verschachtelung verhindern
+    final_ids = set()
+    all_found_sub_ids = set()
 
-    # Scan mod folders (now inside bundle_dir) for their ModIDs
-    bundle_entries = []
-    missing = []
     for mod_name in succeeded_mods:
-        mod_folder = bundle_dir / mod_name
-        found_id = find_mod_id(mod_folder) if mod_folder.is_dir() else None
-        if found_id:
-            bundle_entries.append(f"./{found_id}")
-        else:
-            missing.append(mod_name)
+        mod_path = bundle_dir / mod_name
+        if mod_path.is_dir():
+            found_ids, sub_ids = find_all_mod_ids_in_folder(mod_path)
+            final_ids.update(found_ids)
+            all_found_sub_ids.update(sub_ids)
 
-    if missing:
-        print(f"  {yellow('⚠')} No modinfo.json found for {len(missing)} mod(s) – skipped in bundle:")
-        for m in missing:
-            print(f"    {dim('–')} {m}")
+    # 3. "Aufräumen": Entferne IDs, die bereits in einer anderen Mod gebündelt sind
+    # So verhindern wir, dass eine ID doppelt registriert wird.
+    clean_bundle_list = [mid for mid in final_ids if mid not in all_found_sub_ids]
 
-    if not bundle_entries:
-        print(f"  {red('✗')} No mod IDs found – bundle skipped.")
+    if not clean_bundle_list:
+        print(f"  {red('✗')} No valid mod IDs found – bundle aborted.")
         return
 
-    # Build the modinfo slug
-    slug = "".join(c if c.isalnum() or c == "-" else "-" for c in display_name.lower()).strip("-")
-    slug = re.sub(r"-+", "-", slug)
+    # 4. JSON Erstellung
+    slug = re.sub(r"-+", "-", "".join(c if c.isalnum() or c == "-" else "-" for c in display_name.lower()).strip("-"))
     mod_id_slug = f"collection-{slug}-{collection_id}"
 
     modinfo = {
@@ -535,29 +544,25 @@ def bundle_as_collection(output_dir: Path, collection_name: str, collection_id: 
         "Version": "1.0.0",
         "Anno": 8,
         "Difficulty": "normal",
-        "ModName": {
-            "English": display_name
-        },
-        "Category": {
-            "English": "Collection"
-        },
+        "ModName": { "English": display_name },
+        "Category": { "English": "Collection" },
         "CreatorName": creator,
-        "CreatorContact": "",
         "Development": {
             "Dependencies": [],
             "DeployPath": "${annoMods}/${modName}",
-            "Bundle": bundle_entries
+            "Bundle": sorted(clean_bundle_list)
         }
     }
 
-    modinfo_path = bundle_dir / "modinfo.json"
-    with open(modinfo_path, "w", encoding="utf-8") as f:
+    with open(bundle_dir / "modinfo.json", "w", encoding="utf-8") as f:
         json.dump(modinfo, f, indent=2, ensure_ascii=False)
 
-    print(f"  {green('✓')} Bundle folder : {cyan(str(bundle_dir.resolve()))}")
-    print(f"  {dim('–')} ModID         : {mod_id_slug}")
-    print(f"  {dim('–')} Mods bundled  : {len(bundle_entries)}")
-    print(f"  {dim('–')} modinfo.json written")
+    print(f"\n  {bold(green('═══ Bundle created! ═══'))}\n")
+    print(f"  {green('✓')} Bundle folder  : {cyan(str(bundle_dir.resolve()))}")
+    print(f"  {dim('–')} ModID          : {mod_id_slug}")
+    print(f"  {dim('–')} Unique IDs     : {len(clean_bundle_list)}")
+    if all_found_sub_ids:
+        print(f"  {dim('–')} Sub-IDs hidden : {len(all_found_sub_ids)} (already in sub-bundles)")
 
 
 def sanitize(name: str) -> str:
@@ -689,23 +694,70 @@ def ask_mode() -> str:
 
 
 def ask_credentials(need_token=True) -> tuple:
-    """Ask for API key and optionally OAuth token. Returns (api_key, token)."""
+    """Ask for API key and optionally OAuth token, with save/load from credentials.json."""
+    creds = load_credentials()
+
+    # ── API Key ───────────────────────────────
     print(f"\n  {bold('API Key')}")
     print(f"  {dim('Find your API key at https://mod.io/me/access under \"API Access\".')}\n")
-    api_key = ""
-    while not api_key:
-        api_key = ask("Your mod.io API Key")
-        if not api_key:
-            print(f"  {yellow('API key cannot be empty.')}")
 
+    saved_key = creds.get("api_key")
+    if saved_key:
+        print(f"  {green('✓')} Saved API key found: {dim(saved_key[:6] + '…' + saved_key[-4:])}")
+        if ask_yes_no("Use saved API key?", default=True):
+            api_key = saved_key
+        else:
+            api_key = ""
+            while not api_key:
+                api_key = ask("Your mod.io API Key")
+                if not api_key:
+                    print(f"  {yellow('API key cannot be empty.')}")
+            if ask_yes_no("Save this API key for next time?", default=True):
+                creds["api_key"] = api_key
+                save_credentials(creds)
+                print(f"  {green('✓')} API key saved.")
+    else:
+        api_key = ""
+        while not api_key:
+            api_key = ask("Your mod.io API Key")
+            if not api_key:
+                print(f"  {yellow('API key cannot be empty.')}")
+        if ask_yes_no("Save this API key for next time?", default=True):
+            creds["api_key"] = api_key
+            save_credentials(creds)
+            print(f"  {green('✓')} API key saved.")
+
+    # ── OAuth Token ───────────────────────────
     token = None
     if need_token:
         print(f"\n  {bold('OAuth Token')} {dim('(optional)')}")
         print(f"  {dim('Only needed for private collections. Press Enter to skip.')}\n")
-        if ask_yes_no("Use an OAuth token for private collections?", default=False):
-            token = ask("Your OAuth token", password=True)
-            if not token:
-                print(f"  {yellow('No token entered – skipping.')}")
+
+        saved_token = creds.get("token")
+        if saved_token:
+            print(f"  {green('✓')} Saved token found: {dim(saved_token[:6] + '…' + saved_token[-4:])}")
+            if ask_yes_no("Use saved OAuth token?", default=True):
+                token = saved_token
+            else:
+                if ask_yes_no("Enter a new OAuth token?", default=False):
+                    token = ask("Your OAuth token", password=True)
+                    if token:
+                        if ask_yes_no("Save this token for next time?", default=True):
+                            creds["token"] = token
+                            save_credentials(creds)
+                            print(f"  {green('✓')} Token saved.")
+                    else:
+                        print(f"  {yellow('No token entered – skipping.')}")
+        else:
+            if ask_yes_no("Use an OAuth token for private collections?", default=False):
+                token = ask("Your OAuth token", password=True)
+                if token:
+                    if ask_yes_no("Save this token for next time?", default=True):
+                        creds["token"] = token
+                        save_credentials(creds)
+                        print(f"  {green('✓')} Token saved.")
+                else:
+                    print(f"  {yellow('No token entered – skipping.')}")
 
     return api_key, token
 
@@ -800,21 +852,34 @@ def wizard_bundle():
             break
         print(f"  {yellow('Folder not found. Please enter a valid path.')}")
 
-    # Discover mod sub-folders that contain a modinfo.json
+    # Discover mod sub-folders
     found = []
+    no_modinfo = []
     for entry in sorted(mods_dir.iterdir()):
         if entry.is_dir():
             mod_id = find_mod_id(entry)
             if mod_id:
                 found.append((entry.name, mod_id))
+            else:
+                no_modinfo.append(entry.name)
 
-    if not found:
-        print(f"  {red('✗')} No mods with modinfo.json found in that folder.")
+    if not found and not no_modinfo:
+        print(f"  {red('✗')} No mod folders found in that folder.")
         sys.exit(1)
 
-    print(f"\n  {green('✓')} Found {bold(str(len(found)))} mod(s) with modinfo.json:\n")
-    for name, mid in found:
-        print(f"    {dim('–')} {name}  {dim(f'[ModID: {mid}]')}")
+    if found:
+        print(f"\n  {green('✓')} Found {bold(str(len(found)))} mod(s) with modinfo.json:\n")
+        for name, mid in found:
+            print(f"    {dim('–')} {name}  {dim(f'[ModID: {mid}]')}")
+
+    if no_modinfo:
+        print(f"\n  {yellow('⚠')} {len(no_modinfo)} folder(s) without modinfo.json – will be skipped in bundle:")
+        for name in no_modinfo:
+            print(f"    {dim('–')} {name}")
+
+    if not found:
+        print(f"\n  {red('✗')} No bundleable mods found.")
+        sys.exit(1)
 
     print()
     display_name = ask("Bundle display name")
@@ -955,8 +1020,8 @@ def run_mod():
 def run_bundle():
     mods_dir, found, display_name, creator = wizard_bundle()
 
-    # Build bundle entries from already-found mod IDs
-    bundle_entries = [f"./{mid}" for _, mid in found]
+    # Build bundle entries using folder names (Anno 117 expects folder names, not ModIDs)
+    bundle_entries = [f"./{mod_name}" for mod_name, _ in found]
 
     slug = "".join(c if c.isalnum() or c == "-" else "-" for c in display_name.lower()).strip("-")
     slug = re.sub(r"-+", "-", slug)
