@@ -1,6 +1,6 @@
-# ModioDirect
+# ModIO-Collection-Downloader
 
-**ModioDirect** is a simple command-line tool to download entire mod collections from [mod.io](https://mod.io) — no config files, no arguments needed. Just run it and follow the prompts.
+**ModIO-Collection-Downloader** is a simple command-line tool to download entire mod collections from [mod.io](https://mod.io) — no config files, no arguments needed. Just run it and follow the prompts.
 
 ---
 
@@ -34,14 +34,14 @@
    During installation, make sure to check **"Add Python to PATH"**.
 
 2. **Download the script**
-   Either clone this repo or just download `ModioDirect.py` directly.
+   Either clone this repo or just download `ModIO-Collection-Downloader.py` directly.
 
 3. **Open a terminal**
    Press `Win + R`, type `cmd`, press Enter.
 
 4. **Run the script**
    ```
-   python ModioDirect.py
+   python ModIO-Collection-Downloader.py
    ```
 
 ---
@@ -59,11 +59,11 @@
    ```
 
 2. **Download the script**
-   Either clone this repo or download `ModioDirect.py` directly.
+   Either clone this repo or download `ModIO-Collection-Downloader.py` directly.
 
 3. **Run the script**
    ```
-   python3 ModioDirect.py
+   python3 ModIO-Collection-Downloader.py
    ```
 
 ---
@@ -87,17 +87,17 @@
    ```
 
 2. **Download the script**
-   Either clone this repo or download `ModioDirect.py` directly.
+   Either clone this repo or download `ModIO-Collection-Downloader.py` directly.
 
 3. **Run the script**
    ```
-   python3 ModioDirect.py
+   python3 ModIO-Collection-Downloader.py
    ```
 
    Optionally, make it executable so you can run it directly:
    ```bash
-   chmod +x ModioDirect.py
-   ./ModioDirect.py
+   chmod +x ModIO-Collection-Downloader.py
+   ./ModIO-Collection-Downloader.py
    ```
 
 ---
